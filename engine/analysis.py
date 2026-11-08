@@ -211,8 +211,10 @@ def regression_score(dm: dict, im: dict, spot: float, prev_close: float) -> dict
     if dm.get("ok"):
         implied = prev_close * float(np.exp(dm["pred_today_log_ret"]))
         gap = np.log(implied / spot)
-        z = gap / max(dm["resid_std"], 1e-6)
-        daily_sig = float(np.tanh(1.2 * z))
+        z = float(np.clip(gap / max(dm["resid_std"], 1e-6), -3, 3))
+        # softened: a big unexplained move is a lean, not a certainty
+        daily_sig = float(np.tanh(0.5 * z))
+        dm["z_spot_vs_implied"] = z
         dm["implied_close"] = implied
         dm["spot_vs_implied_pct"] = -gap * 100
         parts.append(("daily factor model", daily_sig, 0.4))

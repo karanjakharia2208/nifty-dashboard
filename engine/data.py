@@ -47,7 +47,7 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, lik
        "Chrome/124.0 Safari/537.36")
 
 
-def _clean(df: pd.DataFrame) -> pd.DataFrame | None:
+def _clean(df: pd.DataFrame, daily: bool = False) -> pd.DataFrame | None:
     if df is None or len(df) == 0:
         return None
     df = df.copy()
@@ -57,9 +57,16 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame | None:
     if "volume" not in df:
         df["volume"] = 0.0
     df = df.dropna(subset=["close"])
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    df.index = df.index.tz_convert(IST)
+    if daily:
+        # Daily bars are calendar dates in the exchange's own zone (Tokyo,
+        # New York...). Keep that calendar date rather than converting the
+        # instant, otherwise an Asian session lands on the previous day.
+        idx = df.index.tz_localize(None) if df.index.tz is not None else df.index
+        df.index = pd.DatetimeIndex(idx.normalize()).tz_localize(IST)
+    else:
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df.index = df.index.tz_convert(IST)
     df = df[~df.index.duplicated(keep="last")].sort_index()
     return df if len(df) else None
 
@@ -84,7 +91,7 @@ def yahoo_batch(names: list[str], period: str, interval: str) -> dict[str, pd.Da
     for n, s in zip(names, syms):
         try:
             sub = raw[s] if isinstance(raw.columns, pd.MultiIndex) else raw
-            cl = _clean(sub)
+            cl = _clean(sub, daily=(interval == "1d"))
             if cl is not None and len(cl) > 5:
                 out[n] = cl
         except Exception:
@@ -116,12 +123,31 @@ def nse_option_chain(symbol="NIFTY") -> dict:
     """PCR / OI by expiry, max pain, OI walls. Best effort; {} on failure."""
     try:
         s = _nse_session()
+        rows, spot, as_of, expiry_list = [], 0.0, None, []
         r = s.get(f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}", timeout=15)
-        r.raise_for_status()
-        js = r.json()
-        recs = js["records"]
-        spot = float(recs.get("underlyingValue") or 0)
-        rows = recs["data"]
+        if r.status_code == 200:
+            recs = r.json()["records"]
+            rows, spot, as_of = recs["data"], float(recs.get("underlyingValue") or 0), recs.get("timestamp")
+            expiry_list = recs.get("expiryDates", [])
+        else:
+            # newer NSE layout: one call per expiry
+            ci = s.get(f"https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}", timeout=15)
+            ci.raise_for_status()
+            cj = ci.json()
+            expiry_list = cj.get("expiryDates") or cj.get("expiries") or []
+            for e in expiry_list[:4]:
+                rr = s.get(f"https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol={symbol}&expiry={e}", timeout=15)
+                if rr.status_code != 200:
+                    continue
+                recs = rr.json().get("records", {})
+                for row in recs.get("data", []):
+                    row.setdefault("expiryDate", e)
+                    rows.append(row)
+                spot = float(recs.get("underlyingValue") or spot or 0)
+                as_of = recs.get("timestamp") or as_of
+            if not rows:
+                raise RuntimeError(f"option chain unavailable (old endpoint HTTP {r.status_code}, v3 empty)")
+        recs = {"expiryDates": expiry_list, "timestamp": as_of}
         by_exp: dict[str, dict] = {}
         for row in rows:
             e = row["expiryDate"]

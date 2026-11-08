@@ -36,6 +36,8 @@ def detect(df: pd.DataFrame, tf: str) -> list[dict]:
     piv = swing_points(df, atr_mult=1.5 if tf == "intraday" else 1.0)
     pts = [(i, p, k[0]) for i, p, k in piv]
     tol = 0.9 * a  # equality tolerance for tops/bottoms
+    recent = 60 if tf == "intraday" else 40  # last pivot must be this recent (bars)
+    near_pct = 0.015 if tf == "intraday" else 0.04  # trigger must be this close to price
     hits = []
 
     def add(name, bias, status, conf, target, trigger, note, idx_from):
@@ -52,13 +54,13 @@ def detect(df: pd.DataFrame, tf: str) -> list[dict]:
         # Double top: H, L, H (equal highs) then price below the middle low
         for j in range(len(last) - 2):
             a1, b, a2 = last[j], last[j + 1], last[j + 2]
-            if a1[2] == "H" and b[2] == "L" and a2[2] == "H" and _near(a1[1], a2[1], tol) and a2[0] >= n - 40 * (3 if tf == "daily" else 1):
+            if a1[2] == "H" and b[2] == "L" and a2[2] == "H" and _near(a1[1], a2[1], tol) and a2[0] >= n - recent:
                 neck = b[1]
                 height = max(a1[1], a2[1]) - neck
                 status = "confirmed" if px < neck else "forming"
                 add("Double top", -1, status, 0.55 if status == "forming" else 0.75,
                     neck - height, neck, f"Twin highs near {a1[1]:.0f}; neckline {neck:.0f}", a1[0])
-            if a1[2] == "L" and b[2] == "H" and a2[2] == "L" and _near(a1[1], a2[1], tol) and a2[0] >= n - 40 * (3 if tf == "daily" else 1):
+            if a1[2] == "L" and b[2] == "H" and a2[2] == "L" and _near(a1[1], a2[1], tol) and a2[0] >= n - recent:
                 neck = b[1]
                 height = neck - min(a1[1], a2[1])
                 status = "confirmed" if px > neck else "forming"
@@ -68,6 +70,8 @@ def detect(df: pd.DataFrame, tf: str) -> list[dict]:
         last = pts[-7:]
         for j in range(len(last) - 4):
             s = last[j:j + 5]
+            if s[-1][0] < n - recent:
+                continue
             kinds = "".join(p[2] for p in s)
             if kinds == "HLHLH":
                 h1, l1, h2, l2, h3 = s
@@ -105,9 +109,9 @@ def detect(df: pd.DataFrame, tf: str) -> list[dict]:
     # ---- continuation / consolidation via trendlines over the last window ----
     win = 60 if tf == "intraday" else 40
     seg = df.iloc[-win:]
-    recent = [p for p in pts if p[0] >= n - win]
-    hs = [(i, p) for i, p, k in recent if k == "H"]
-    ls = [(i, p) for i, p, k in recent if k == "L"]
+    recent_pts = [p for p in pts if p[0] >= n - win]
+    hs = [(i, p) for i, p, k in recent_pts if k == "H"]
+    ls = [(i, p) for i, p, k in recent_pts if k == "L"]
     if len(hs) >= 2 and len(ls) >= 2:
         mh, ch = _fit_line([i for i, _ in hs], [p for _, p in hs])
         ml, cl = _fit_line([i for i, _ in ls], [p for _, p in ls])
@@ -195,6 +199,8 @@ def detect(df: pd.DataFrame, tf: str) -> list[dict]:
                     add("Rounding top / inverse cup", -1, st, 0.45 if st == "forming" else 0.65, rim - depth, rim,
                         f"Dome top, rim ≈{rim:.0f}", n - win2)
 
+    # drop patterns whose trigger is far from where price is now
+    hits = [h for h in hits if h["trigger"] is None or abs(h["trigger"] - px) / px <= near_pct]
     # de-duplicate by name keeping highest confidence
     best = {}
     for h in hits:

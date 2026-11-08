@@ -34,11 +34,18 @@ def ols(X: np.ndarray, y: np.ndarray, ridge: float = 1e-6, names=None) -> dict:
     X = np.asarray(X, float)
     y = np.asarray(y, float)
     n, k = X.shape
-    Xc = np.column_stack([np.ones(n), X])
+    # Standardise the regressors so the ridge penalty is relative to unit
+    # variance (returns are ~1e-3 in size; an absolute penalty would crush
+    # every coefficient to zero), then map the coefficients back.
+    mu = X.mean(axis=0)
+    sd = X.std(axis=0)
+    sd[sd < 1e-12] = 1.0
+    Xs = (X - mu) / sd
+    Xc = np.column_stack([np.ones(n), Xs])
     XtX = Xc.T @ Xc + ridge * n * np.eye(k + 1)
     XtX[0, 0] -= ridge * n  # don't shrink intercept
-    beta = np.linalg.solve(XtX, Xc.T @ y)
-    resid = y - Xc @ beta
+    beta_s = np.linalg.solve(XtX, Xc.T @ y)
+    resid = y - Xc @ beta_s
     ss_res = float(resid @ resid)
     ss_tot = float(((y - y.mean()) ** 2).sum()) or 1e-12
     r2 = 1 - ss_res / ss_tot
@@ -46,8 +53,11 @@ def ols(X: np.ndarray, y: np.ndarray, ridge: float = 1e-6, names=None) -> dict:
     XtX_inv = np.linalg.inv(XtX)
     meat = (Xc * resid[:, None]).T @ (Xc * resid[:, None])
     cov = XtX_inv @ meat @ XtX_inv
-    se = np.sqrt(np.clip(np.diag(cov), 1e-18, None))
-    t = beta / se
+    se_s = np.sqrt(np.clip(np.diag(cov), 1e-18, None))
+    t = beta_s / se_s  # t-stats are scale-free
+    beta = np.empty(k + 1)
+    beta[1:] = beta_s[1:] / sd
+    beta[0] = beta_s[0] - float(np.dot(beta[1:], mu))
     out = {"beta": beta, "t": t, "r2": float(r2), "adj_r2": float(adj), "n": int(n),
            "rmse": float(np.sqrt(ss_res / max(n - k - 1, 1))), "resid_std": float(resid.std(ddof=1)) if n > 2 else 0.0}
     if names is not None:
@@ -164,9 +174,10 @@ def align_factors(nifty5: pd.DataFrame, intraday: dict[str, pd.DataFrame]) -> pd
         if nm not in intraday or nm == "NIFTY":
             continue
         s = np.log(intraday[nm]["close"].astype(float))
-        # Yahoo bar timestamps are bar *starts*; shift by one bar so a factor
-        # bar is only used once it has closed.
-        s.index = s.index + pd.Timedelta(minutes=5)
+        # Yahoo stamps every 5-minute bar by its start, for Nifty and for the
+        # factors alike, so the bar starting at 09:15 closes at 09:20 on both
+        # sides: align on the same bar start (as-of, forward-filled through
+        # the hours a factor does not trade).
         s = s[~s.index.duplicated(keep="last")].sort_index()
         aligned = s.reindex(s.index.union(idx)).ffill().reindex(idx)
         cols[nm] = aligned
@@ -181,8 +192,15 @@ def intraday_model(nifty5: pd.DataFrame, intraday: dict[str, pd.DataFrame], sess
     if len(n5) < 300:
         return {"ok": False, "reason": "not enough intraday bars"}
     F = align_factors(n5, intraday)
-    F = F.dropna(axis=1, thresh=int(0.8 * len(F)))
     day = n5.index.normalize()
+    # keep factors with decent coverage over the beta-fit window
+    all_days = sorted(set(day))
+    fit_window = day.isin(all_days[-(sessions + 1):])
+    coverage = F[fit_window].notna().mean()
+    dropped = {nm: round(float(c), 2) for nm, c in coverage.items() if c < 0.6}
+    F = F[[nm for nm in F.columns if nm not in dropped]]
+    if F.shape[1] == 0:
+        return {"ok": False, "reason": "no intraday factors aligned", "dropped_factors": dropped}
     ln = np.log(n5["close"].astype(float))
     y = ln.groupby(day).diff()  # within-session 5m returns
     fr = F.groupby(day).diff()  # factor returns over the same intervals
@@ -248,6 +266,7 @@ def intraday_model(nifty5: pd.DataFrame, intraday: dict[str, pd.DataFrame], sess
                           "inputs": dict(zip(["fair_value_gap", "factor_mom_30m", "own_mom_30m", "time_of_day"], map(float, x_now)))}
     return {
         "ok": True, "fit_sessions": len(fit_days), "n_bars": beta_m["n"], "r2_contemporaneous": beta_m["r2"],
+        "factor_coverage": {nm: round(float(c), 2) for nm, c in coverage.items()}, "dropped_factors": dropped,
         "betas": betas, "beta_table": beta_m["coef_table"], "sigma_5m": sigma_1bar,
         "implied_path": [[int(t.timestamp()), round(float(v), 2)] for t, v in implied.items()],
         "gap_now_pct": float(gap[-1] * 100) if len(gap) else None,

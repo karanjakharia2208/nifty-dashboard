@@ -102,7 +102,7 @@ def main():
     t0 = time.time()
     now = pd.Timestamp.now(tz=IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.0.0"}
+           "market_status": market_status(now), "engine_version": "1.0.1"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -251,7 +251,7 @@ def main():
         "sources": D.STATUS,
     }
     dump(os.path.join(args.out, "latest.json"), latest)
-    dump(os.path.join(args.out, "daily.json"), {"symbol": "NIFTY 50", "bars": ohlc_records(nd)})
+    dump(os.path.join(args.out, "daily.json"), {"symbol": "NIFTY 50", "bars": ohlc_records(nd.tail(1500))})
     recent_days = days[-10:]
     dump(os.path.join(args.out, "intraday.json"), {"symbol": "NIFTY 50", "interval": "5m",
                                                     "bars": ohlc_records(s5[s5.index.normalize().isin(recent_days)])})

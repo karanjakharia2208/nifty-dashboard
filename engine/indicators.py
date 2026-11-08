@@ -320,12 +320,17 @@ def compute_all(df: pd.DataFrame, tf: str) -> dict:
     # swings and fib
     piv = swing_points(df, atr_mult=1.5 if tf == "intraday" else 1.0)
     pts = [p for p in piv if not p[2].endswith("*")]
-    highs = [p for p in pts if p[2] == "H"]
-    lows = [p for p in pts if p[2] == "L"]
-    if highs and lows:
-        lh, ll = highs[-1], lows[-1]
-        up_move = ll[0] < lh[0]  # low came first -> up move
-        hi, lo = lh[1], ll[1]
+    # Dominant swing for Fibonacci: the most recent confirmed pivot pair at
+    # least 3 ATR tall inside the window; otherwise the window's high/low.
+    win = 150 if tf == "intraday" else 120  # ~2 sessions / ~6 months
+    seg = df.iloc[-win:]
+    hi_i, lo_i = int(seg["high"].values.argmax()), int(seg["low"].values.argmin())
+    hi, lo, up_move = float(seg["high"].iloc[hi_i]), float(seg["low"].iloc[lo_i]), lo_i < hi_i
+    for a, b in zip(pts[-7:-1], pts[-6:]):
+        if a[2] != b[2] and abs(b[1] - a[1]) >= 3 * a14 and b[0] >= len(df) - win:
+            up_move = a[2] == "L"
+            hi, lo = (b[1], a[1]) if up_move else (a[1], b[1])
+    if hi > lo:
         out["swing_high"], out["swing_low"] = hi, lo
         out["fib"] = fib_levels(hi, lo, up=up_move)
         out["fib_direction"] = "up" if up_move else "down"
@@ -410,7 +415,8 @@ def votes(ind: dict, tf: str) -> list[dict]:
         add("CCI 20", np.tanh(cc / 150) if abs(cc) < 200 else -np.sign(cc) * 0.3, 0.6, f"CCI {cc:+.0f}")
     wr = ind.get("williams_r")
     if wr is not None and not np.isnan(wr):
-        add("Williams %R", (wr + 50) / 30 if -80 < wr < -20 else (0.4 if wr <= -80 else -0.4), 0.5, f"%R {wr:.0f}")
+        add("Williams %R", (wr + 50) / 30 if -80 < wr < -20 else (0.4 if wr <= -80 else -0.4), 0.5,
+            f"%R {wr:.0f} ({'overbought' if wr > -20 else 'oversold' if wr < -80 else 'mid-range'})")
     rc = ind.get("roc12")
     if rc is not None and not np.isnan(rc):
         add("ROC 12", np.tanh(rc * (3 if tf == "intraday" else 0.5)), 0.6, f"ROC {rc:+.2f}%")
@@ -436,13 +442,17 @@ def votes(ind: dict, tf: str) -> list[dict]:
         hi, lo = ind["swing_high"], ind["swing_low"]
         if hi > lo:
             pos = (px - lo) / (hi - lo)
-            if ind["fib_direction"] == "up":
+            if pos > 1.0:
+                vote, note = 0.5, f"Above the swing high {hi:.0f} — extension zone (127.2% {fib['1.272']:.0f}, 161.8% {fib['1.618']:.0f})" if ind["fib_direction"] == "up" else f"Back above the swing high {hi:.0f}; down-swing negated"
+            elif pos < 0.0:
+                vote, note = -0.5, f"Below the swing low {lo:.0f} — extension zone" if ind["fib_direction"] == "down" else f"Below the swing low {lo:.0f}; up-swing negated"
+            elif ind["fib_direction"] == "up":
                 # pullback in an up-move: deeper than 61.8% weakens the case
                 vote = 0.6 if pos > 0.618 else 0.2 if pos > 0.5 else -0.2 if pos > 0.382 else -0.6
-                note = f"Up-swing {lo:.0f}→{hi:.0f}; retraced to {100 * (1 - pos):.0f}%"
+                note = f"Up-swing {lo:.0f}→{hi:.0f}; retraced {100 * (1 - pos):.0f}% of it"
             else:
                 vote = -0.6 if pos < 0.382 else -0.2 if pos < 0.5 else 0.2 if pos < 0.618 else 0.6
-                note = f"Down-swing {hi:.0f}→{lo:.0f}; retraced {100 * pos:.0f}%"
+                note = f"Down-swing {hi:.0f}→{lo:.0f}; retraced {100 * pos:.0f}% of it"
             add("Fibonacci", vote, 0.8, note)
     return v
 
