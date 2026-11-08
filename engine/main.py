@@ -105,7 +105,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.1.1"}
+           "market_status": market_status(now), "engine_version": "1.1.2"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -148,6 +148,28 @@ def main():
         "open": float(tb["open"].iloc[0]), "high": float(tb["high"].max()), "low": float(tb["low"].min()),
         "bars_today": int(len(tb)),
     }
+    manual = load_json(os.path.join(args.out, "manual_inputs.json"), {})
+    # A newer official print than Yahoo's last bar (special sessions such as
+    # Muhurat trading, which Yahoo publishes late or not at all): prefer a
+    # manual session override, then NSE's own spot from the option chain.
+    official = None
+    so = manual.get("session_override") or {}
+    try:
+        if so.get("close") and pd.Timestamp(so["date"]).date() > today.date():
+            official = {"source": "manual entry", "close": float(so["close"]), "date": str(so["date"])}
+    except Exception:
+        pass
+    if official is None and oc.get("spot") and oc.get("as_of"):
+        try:
+            nse_t = pd.Timestamp(oc["as_of"])
+            if nse_t.date() > today.date() and float(oc["spot"]) > 0:
+                official = {"source": f"NSE spot as of {oc['as_of']}", "close": float(oc["spot"]), "date": str(nse_t.date())}
+        except Exception:
+            pass
+    call_ref = prev_close if len(tb) else spot  # reference close for the next session's call
+    if official and run["market_status"] != "open":
+        market["official_close"] = official
+        call_ref = official["close"]
     snap = {}
     for nm in ["BANKNIFTY", "INDIAVIX", "USDINR", "ES", "NQ", "NIKKEI", "HSI", "SHANGHAI", "KOSPI", "BRENT", "WTI",
                "GOLD", "SILVER", "COPPER", "DXY", "US10Y", "USDJPY", "EURUSD", "BTC", "FTSE", "DAX", "STOXX50"]:
@@ -170,7 +192,6 @@ def main():
         vix_ratio = float(v.iloc[-1] / v.tail(21).mean())
 
     # ------------------------------------------------------- technical ---
-    manual = load_json(os.path.join(args.out, "manual_inputs.json"), {})
     tech = technical_score(n5, nd_hist, oc if oc.get("expiries") else None, manual)
     ind5, indd = tech["_ind5"], tech["_indd"]
 
@@ -244,9 +265,18 @@ def main():
     tb_today = s5[s5.index.normalize() == now.normalize()]
     try:
         dc_log = load_json(os.path.join(args.out, "daily_calls.json"), {"calls": []})
+        if len(tb_today):
+            call_spot, call_prev, call_gm = spot, prev_close, gm
+        else:
+            # before the open: the latest official close is both the reference and
+            # the base for the gap estimate
+            call_spot = call_prev = call_ref
+            call_gm = dict(gm)
+            if gm.get("ok"):
+                call_gm["estimated_open"] = call_ref * float(np.exp(gm["estimated_gap_pct"] / 100))
         dc_log = daycall.update_log(
             dc_log, now, s5, run["market_status"],
-            lambda: daycall.make_day_call(now, tb_today, nd_hist, tech, dict(dm), gm, im, zones, vix_ratio, spot, prev_close))
+            lambda: daycall.make_day_call(now, tb_today, nd_hist, tech, dict(dm), call_gm, im, zones, vix_ratio, call_spot, call_prev))
         dump(os.path.join(args.out, "daily_calls.json"), dc_log)
         today_str = now.strftime("%Y-%m-%d")
         day_call = next((c for c in dc_log["calls"] if c["date"] == today_str), None) or (dc_log["calls"][-1] if dc_log["calls"] else None)
