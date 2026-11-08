@@ -35,7 +35,14 @@ def build_levels(n5: pd.DataFrame, daily: pd.DataFrame, ind5: dict, indd: dict, 
     days = sorted(set(n5.index.normalize()))
     today = days[-1]
     today_bars = n5[n5.index.normalize() == today]
-    prev = n5[n5.index.normalize() == days[-2]] if len(days) > 1 else today_bars
+    # "previous day" structure comes from the last FULL session: a Muhurat or
+    # half-day session (a handful of bars) would give meaningless pivots.
+    prev = today_bars
+    for d in reversed(days[:-1]):
+        cand = n5[n5.index.normalize() == d]
+        if len(cand) >= 40:
+            prev = cand
+            break
     lv = []
 
     def add(name, value, kind, source, strength=1.0):
