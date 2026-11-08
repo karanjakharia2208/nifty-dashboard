@@ -29,6 +29,7 @@ import indicators as ti  # noqa: E402
 from analysis import (backtest, build_levels, cluster_zones, combine, forecast_cone, regression_score,  # noqa: E402
                       technical_score, trade_plan)
 from regression import daily_model, gap_model, intraday_model, HORIZONS  # noqa: E402
+import daycall  # noqa: E402
 
 IST = D.IST
 
@@ -101,14 +102,19 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
     now = pd.Timestamp.now(tz=IST)
+    if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
+        now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.0.1"}
+           "market_status": market_status(now), "engine_version": "1.1.0"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
     intraday = D.yahoo_batch(intraday_names, period="60d", interval="5m")
     daily_names = ["NIFTY"] + D.DAILY_FACTORS
     daily = D.yahoo_batch(daily_names, period="10y", interval="1d")
+    if os.environ.get("ENGINE_NOW"):  # testing hook: hide bars from the "future"
+        intraday = {k: v[v.index <= now] for k, v in intraday.items()}
+        daily = {k: v[v.index <= now] for k, v in daily.items()}
     if "NIFTY" not in intraday or "NIFTY" not in daily:
         run["error"] = "Nifty data unavailable from Yahoo"
         dump(os.path.join(args.out, "status.json"), {"run": run, "sources": D.STATUS})
@@ -234,12 +240,28 @@ def main():
                    "hit_rate_2h": round(sum(1 for r in ev if r.get("hit_2h")) / len([r for r in ev if r.get("hit_2h") is not None]), 3)
                    if any(r.get("hit_2h") is not None for r in ev) else None}
 
+    # -------------------------------------------------------- day call ---
+    tb_today = s5[s5.index.normalize() == now.normalize()]
+    try:
+        dc_log = load_json(os.path.join(args.out, "daily_calls.json"), {"calls": []})
+        dc_log = daycall.update_log(
+            dc_log, now, s5, run["market_status"],
+            lambda: daycall.make_day_call(now, tb_today, nd_hist, tech, dict(dm), gm, im, zones, vix_ratio, spot, prev_close))
+        dump(os.path.join(args.out, "daily_calls.json"), dc_log)
+        today_str = now.strftime("%Y-%m-%d")
+        day_call = next((c for c in dc_log["calls"] if c["date"] == today_str), None) or (dc_log["calls"][-1] if dc_log["calls"] else None)
+        results_summary = dc_log.get("summary")
+    except Exception as e:
+        traceback.print_exc()
+        day_call, results_summary = {"error": f"{type(e).__name__}: {e}"}, None
+
     # ------------------------------------------------------------ write ---
     run["seconds"] = round(time.time() - t0, 1)
     latest = {
         "run": run, "market": market, "snapshot": snap, "vix_ratio": vix_ratio,
         "prediction": {"combined": comb, "technical_score": tech["score"], "regression_score": reg["score"],
                        "cone": cone, "plan": plan, "horizons_bars": HORIZONS},
+        "day_call": day_call, "results_summary": results_summary,
         "technical": {k: v for k, v in tech.items() if not k.startswith("_")},
         "regression": {"daily": dm, "intraday": im, "gap_model": gm, "score": reg},
         "levels": levels, "zones": zones,
