@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p out
           if git fetch origin data:data 2>/dev/null; then
-            for f in signal_log.json backtest.json manual_inputs.json; do
+            for f in signal_log.json backtest.json manual_inputs.json daily_calls.json; do
               git show data:$f > out/$f 2>/dev/null || true
             done
           fi
