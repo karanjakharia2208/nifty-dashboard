@@ -1,0 +1,61 @@
+name: nifty-engine
+
+on:
+  schedule:
+    - cron: "*/10 3-10 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force_backtest:
+        description: "Recompute the walk-forward backtest"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nifty-engine
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r engine/requirements.txt
+
+      - name: Restore previous outputs
+        run: |
+          mkdir -p out
+          if git fetch origin data:data 2>/dev/null; then
+            for f in signal_log.json backtest.json manual_inputs.json; do
+              git show data:$f > out/$f 2>/dev/null || true
+            done
+          fi
+          for f in out/*.json; do [ -s "$f" ] || rm -f "$f"; done
+
+      - name: Run engine
+        env:
+          FORCE_BT: ${{ github.event.inputs.force_backtest }}
+        run: |
+          EXTRA=""
+          if [ "$FORCE_BT" = "true" ]; then EXTRA="--force-backtest"; fi
+          python engine/main.py --out out $EXTRA
+
+      - name: Publish results to the data branch
+        run: |
+          cd out
+          git init -q
+          git checkout -q -b data
+          git add -A
+          git -c user.name="nifty-engine" -c user.email="nifty-engine@users.noreply.github.com" commit -qm "data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
