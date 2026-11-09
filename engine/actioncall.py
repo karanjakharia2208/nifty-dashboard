@@ -236,9 +236,11 @@ def update_log(actions: list[dict], now: pd.Timestamp, s5: pd.DataFrame, market_
                 call["run_at_ist"] = now.strftime("%H:%M")   # when the engine actually ran; locked_at_ist is the signal time (09:35)
                 actions.append(call)
         else:
+            no_bars = not len(s5[days == pd.Timestamp(today).tz_localize(s5.index.tz)])
             actions.append({"date": today, "void": True, "evaluated": False, "locked_at": int(now.timestamp()),
                             "locked_at_ist": now.strftime("%H:%M"),
-                            "void_reason": f"no usable engine run between {LOCK_TIME:%H:%M} and {LOCK_DEADLINE:%H:%M} "
+                            "void_reason": "no session data (holiday or feed gap)" if no_bars else
+                                           f"no usable engine run between {LOCK_TIME:%H:%M} and {LOCK_DEADLINE:%H:%M} "
                                            f"(no run, or the feed was missing a key series); a late lock was never tested, so no call today"})
     return sorted(actions, key=lambda c: c["date"])[-KEEP_DAYS:]
 
@@ -271,7 +273,7 @@ def backtest(s5: pd.DataFrame, nd: pd.DataFrame, daily: dict, intraday: dict, te
     only data up to then, score at the close. A shuffled-score baseline uses
     the same opening-range plans with the day's scores permuted. Also sweeps
     other lock times (09:20 … 10:00) so the lock time is chosen by evidence."""
-    main = _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, dt.time(9, 30), max_sessions)
+    main = _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, dt.time(9, 30), max_sessions, research=True)
     if not sweep:
         return main
     main["sweep_generated_at"] = int(pd.Timestamp.now(tz="Asia/Kolkata").timestamp())
@@ -296,7 +298,8 @@ def backtest(s5: pd.DataFrame, nd: pd.DataFrame, daily: dict, intraday: dict, te
     return main
 
 
-def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_bar_time: dt.time, max_sessions: int) -> dict:
+def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_bar_time: dt.time, max_sessions: int,
+                 research: bool = False) -> dict:
     days = sorted(set(s5.index.normalize()))
     test_days = days[-(max_sessions + 1):-1]
     inputs = []
@@ -352,7 +355,25 @@ def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_
         sd = summarise(ev)
         execution[f"entry_{(dt.datetime.combine(dt.date.today(), dt.time(9, 35)) + dt.timedelta(minutes=5 * d)):%H:%M}"] = {
             k: sd.get(k) for k in ("trades", "win_rate", "net_points", "net_r", "avg_r_per_trade", "t_stat", "payoff_ratio", "max_drawdown_points", "no_trade_days")}
-    return {"summary": variants[show]["summary"], "baseline": variants[show]["baseline"], "variants": variants, "execution": execution,
+    extra = {}
+    if research:
+        # morning (pre-open) lean per session, for the agreement filter and the dataset
+        day_scores = {}
+        try:
+            import backtest_daily as BD
+            first = min(inp["date"] for inp, _ in inputs)
+            for sg in BD.signals(daily, start_date=pd.Timestamp(first) - pd.Timedelta(days=3)):
+                day_scores[sg["date"]] = float(np.clip(0.5 * sg["tech"] + 0.45 * sg["reg"], -1, 1))
+        except Exception as e:
+            day_scores = {}
+            extra["research_note"] = f"morning lean unavailable: {type(e).__name__}: {e}"
+        try:
+            import research as R
+            extra["research"] = R.run(inputs, show, day_scores)
+            extra["dataset"] = R.dataset(inputs, day_scores)
+        except Exception as e:
+            extra["research"] = {"error": f"{type(e).__name__}: {e}"}
+    return {**extra, "summary": variants[show]["summary"], "baseline": variants[show]["baseline"], "variants": variants, "execution": execution,
             "chosen_variant": chosen, "shown_variant": show, "gate": gate(variants[show]["summary"], variants[show]["baseline"]),
             "records": [{k: c[k] for k in ("date", "score", "stance", "spot", "orb_high", "orb_low")} | {
                 "taken_side": c["result"]["taken"]["side"], "result": c["result"]["taken"]["result"],

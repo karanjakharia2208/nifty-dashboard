@@ -68,8 +68,10 @@ def _label(score):
     return ("Strongly " + bias.lower()) if abs(score) > 0.45 else bias
 
 
-def signals(daily: dict) -> list[dict]:
-    """First pass: everything known before each day's open."""
+def signals(daily: dict, start_date=None) -> list[dict]:
+    """First pass: everything known before each day's open. `start_date`
+    limits the output to dates on or after it (the model is still fitted on
+    the history before each date)."""
     nd = daily["NIFTY"].copy()
     nd = nd[~nd.index.duplicated(keep="last")].sort_index()
     y = _daily_series(nd["close"])
@@ -94,9 +96,12 @@ def signals(daily: dict) -> list[dict]:
     out = []
     model = gapm = None
     cols_used = []
+    start_ts = pd.Timestamp(start_date) if start_date is not None else None
     for k, d in enumerate(dates):
         i = pos_of.get(d)
         if i is None or i < MIN_HISTORY:
+            continue
+        if start_ts is not None and d < start_ts:
             continue
         if model is None or k % REFIT_EVERY == 0:
             win = X.iloc[k - LOOKBACK:k]
