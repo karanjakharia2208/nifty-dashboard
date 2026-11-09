@@ -30,6 +30,7 @@ from analysis import (backtest, build_levels, cluster_zones, combine, forecast_c
                       technical_score, trade_plan)
 from regression import daily_model, gap_model, intraday_model, HORIZONS  # noqa: E402
 import daycall  # noqa: E402
+import actioncall  # noqa: E402
 
 IST = D.IST
 
@@ -105,7 +106,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.2.0"}
+           "market_status": market_status(now), "engine_version": "1.3.0"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -227,6 +228,11 @@ def main():
             bt = backtest(n5, nd, daily, intraday)
             if bt_old and bt_old.get("twenty_year"):
                 bt["twenty_year"] = bt_old["twenty_year"]  # long backtest is produced by backtest_daily.py
+            try:
+                bt["action_backtest"] = actioncall.backtest(s5, nd, daily, intraday, technical_score, intraday_model)
+            except Exception as e:
+                traceback.print_exc()
+                bt["action_backtest"] = (bt_old or {}).get("action_backtest") or {"error": f"{type(e).__name__}: {e}"}
             dump(bt_path, bt)
         except Exception as e:
             bt = bt_old or {"error": f"{type(e).__name__}: {e}"}
@@ -276,16 +282,34 @@ def main():
             call_gm = dict(gm)
             if gm.get("ok"):
                 call_gm["estimated_open"] = call_ref * float(np.exp(gm["estimated_gap_pct"] / 100))
+        prev_actions = dc_log.get("actions", [])
         dc_log = daycall.update_log(
             dc_log, now, s5, run["market_status"],
             lambda: daycall.make_day_call(now, tb_today, nd_hist, tech, dict(dm), call_gm, im, zones, vix_ratio, call_spot, call_prev))
-        dump(os.path.join(args.out, "daily_calls.json"), dc_log)
         today_str = now.strftime("%Y-%m-%d")
         day_call = next((c for c in dc_log["calls"] if c["date"] == today_str), None) or (dc_log["calls"][-1] if dc_log["calls"] else None)
         results_summary = dc_log.get("summary")
+        # the 9:35 action call (opening range + intraday model)
+        ref_close = float(day_call["prev_close"]) if day_call and day_call.get("date") == today_str else prev_close
+        dc_log["actions"] = actioncall.update_log(
+            prev_actions, now, s5, run["market_status"],
+            lambda: actioncall.action_inputs(now, tb_today, nd_hist, tech, im, vix_ratio, ref_close))
+        dc_log["action_summary"] = actioncall.summarise(dc_log["actions"])
+        action_call = next((c for c in dc_log["actions"] if c["date"] == today_str), None) or (dc_log["actions"][-1] if dc_log["actions"] else None)
+        dump(os.path.join(args.out, "daily_calls.json"), dc_log)
+        # During the session Yahoo may still lack a special session (Muhurat), so
+        # its "previous close" can be one session stale; the locked call carries
+        # the official reference close, so the headline uses that.
+        if day_call and day_call.get("date") == market["session_date"] and len(tb_today) and \
+                abs(day_call["prev_close"] - market["prev_close"]) > 0.01:
+            market["prev_close_source"] = "official close from the locked call"
+            market["prev_close"] = float(day_call["prev_close"])
+            market["change"] = market["spot"] - market["prev_close"]
+            market["change_pct"] = (market["spot"] / market["prev_close"] - 1) * 100
     except Exception as e:
         traceback.print_exc()
-        day_call, results_summary = {"error": f"{type(e).__name__}: {e}"}, None
+        day_call, results_summary, action_call = {"error": f"{type(e).__name__}: {e}"}, None, None
+        dc_log = {"calls": [], "actions": [], "action_summary": {"days": 0}}
 
     # ------------------------------------------------------------ write ---
     run["seconds"] = round(time.time() - t0, 1)
@@ -294,6 +318,7 @@ def main():
         "prediction": {"combined": comb, "technical_score": tech["score"], "regression_score": reg["score"],
                        "cone": cone, "plan": plan, "horizons_bars": HORIZONS},
         "day_call": day_call, "results_summary": results_summary,
+        "action_call": action_call, "action_summary": dc_log.get("action_summary"),
         "technical": {k: v for k, v in tech.items() if not k.startswith("_")},
         "regression": {"daily": dm, "intraday": im, "gap_model": gm, "score": reg},
         "levels": levels, "zones": zones,
