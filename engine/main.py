@@ -105,7 +105,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.1.2"}
+           "market_status": market_status(now), "engine_version": "1.2.0"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -225,6 +225,8 @@ def main():
     if need_bt:
         try:
             bt = backtest(n5, nd, daily, intraday)
+            if bt_old and bt_old.get("twenty_year"):
+                bt["twenty_year"] = bt_old["twenty_year"]  # long backtest is produced by backtest_daily.py
             dump(bt_path, bt)
         except Exception as e:
             bt = bt_old or {"error": f"{type(e).__name__}: {e}"}

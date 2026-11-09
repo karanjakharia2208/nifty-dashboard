@@ -64,7 +64,7 @@ def make_day_call(now: pd.Timestamp, tb_today: pd.DataFrame, nd_hist: pd.DataFra
 
     # --- expected range ---------------------------------------------------
     vr = float(np.clip(vix_ratio, 0.7, 1.6))
-    half = 0.55 * atr_d * vr
+    half = 0.65 * atr_d * vr
     center = exp_open + score * 0.35 * atr_d
     lo, hi = center - half, center + half
     if has_bars:  # never predict a range the day has already left
@@ -80,18 +80,27 @@ def make_day_call(now: pd.Timestamp, tb_today: pd.DataFrame, nd_hist: pd.DataFra
     r2 = res[1]["center"] if len(res) > 1 else r1 + max(2 * atr5, (r1 - ref))
     s1 = sup[0]["center"] if sup else ref - 1.5 * atr5
     s2 = sup[1]["center"] if len(sup) > 1 else s1 - max(2 * atr5, (ref - s1))
-    buy = {"side": "buy", "trigger": round(r1 + 0.15 * atr5, 1), "stop": round(s1 - 0.25 * atr5, 1),
-           "targets": [round(r2, 1), round(r2 + (r2 - r1), 1)],
-           "text": f"Buy above {r1 + 0.15 * atr5:,.0f}; stop {s1 - 0.25 * atr5:,.0f}; targets {r2:,.0f} then {r2 + (r2 - r1):,.0f}"}
-    sell = {"side": "sell", "trigger": round(s1 - 0.15 * atr5, 1), "stop": round(r1 + 0.25 * atr5, 1),
-            "targets": [round(s2, 1), round(s2 - (s1 - s2), 1)],
-            "text": f"Sell below {s1 - 0.15 * atr5:,.0f}; stop {r1 + 0.25 * atr5:,.0f}; targets {s2:,.0f} then {s2 - (s1 - s2):,.0f}"}
-    range_buy = {"side": "buy", "trigger": round(lo + 0.15 * atr_d, 1), "stop": round(lo - 0.35 * atr5 * 2, 1),
-                 "targets": [round(center, 1), round(hi - 0.15 * atr_d, 1)], "touch": True,
-                 "text": f"Buy near the range low {lo + 0.15 * atr_d:,.0f}; stop {lo - 0.7 * atr5:,.0f}; targets {center:,.0f} then {hi - 0.15 * atr_d:,.0f}"}
-    range_sell = {"side": "sell", "trigger": round(hi - 0.15 * atr_d, 1), "stop": round(hi + 0.35 * atr5 * 2, 1),
-                  "targets": [round(center, 1), round(lo + 0.15 * atr_d, 1)], "touch": True,
-                  "text": f"Sell near the range high {hi - 0.15 * atr_d:,.0f}; stop {hi + 0.7 * atr5:,.0f}; targets {center:,.0f} then {lo + 0.15 * atr_d:,.0f}"}
+    # Risk is capped at 0.35 daily ATR and the first target sits at least 1R
+    # away, so a plan never risks a whole day's range to make half of one.
+    bt = r1 + 0.15 * atr5
+    brisk = min(bt - (s1 - 0.25 * atr5), 0.35 * atr_d)
+    bstop, bt1 = bt - brisk, max(r2, bt + brisk)
+    bt2 = max(bt1 + brisk, bt + 2 * brisk)
+    buy = {"side": "buy", "trigger": round(bt, 1), "stop": round(bstop, 1), "targets": [round(bt1, 1), round(bt2, 1)],
+           "risk": round(brisk, 1), "text": f"Buy above {bt:,.0f}; stop {bstop:,.0f}; targets {bt1:,.0f} then {bt2:,.0f}"}
+    st = s1 - 0.15 * atr5
+    srisk = min((r1 + 0.25 * atr5) - st, 0.35 * atr_d)
+    sstop, st1 = st + srisk, min(s2, st - srisk)
+    st2 = min(st1 - srisk, st - 2 * srisk)
+    sell = {"side": "sell", "trigger": round(st, 1), "stop": round(sstop, 1), "targets": [round(st1, 1), round(st2, 1)],
+            "risk": round(srisk, 1), "text": f"Sell below {st:,.0f}; stop {sstop:,.0f}; targets {st1:,.0f} then {st2:,.0f}"}
+    rr = 0.15 * atr_d
+    range_buy = {"side": "buy", "trigger": round(lo + rr, 1), "stop": round(lo - rr, 1),
+                 "targets": [round(center, 1), round(hi - rr, 1)], "touch": True, "risk": round(2 * rr, 1),
+                 "text": f"Buy near the range low {lo + rr:,.0f}; stop {lo - rr:,.0f}; targets {center:,.0f} then {hi - rr:,.0f}"}
+    range_sell = {"side": "sell", "trigger": round(hi - rr, 1), "stop": round(hi + rr, 1),
+                  "targets": [round(center, 1), round(lo + rr, 1)], "touch": True, "risk": round(2 * rr, 1),
+                  "text": f"Sell near the range high {hi - rr:,.0f}; stop {hi + rr:,.0f}; targets {center:,.0f} then {lo + rr:,.0f}"}
     if score > 0.15:
         primary, alternate, stance = buy, sell, "BUY"
         advice = (f"Lean long. Buy on a sustained move above {buy['trigger']:,.0f} (or on a dip that holds {s1:,.0f}), "
@@ -104,7 +113,7 @@ def make_day_call(now: pd.Timestamp, tb_today: pd.DataFrame, nd_hist: pd.DataFra
                   f"Flip to the buy plan only if {buy['trigger']:,.0f} breaks.")
     else:
         primary, alternate, stance = range_sell if score <= 0 else range_buy, range_buy if score <= 0 else range_sell, "RANGE"
-        advice = (f"No directional edge: trade the range. Sell near {hi - 0.15 * atr_d:,.0f}, buy near {lo + 0.15 * atr_d:,.0f}, "
+        advice = (f"No directional edge: trade the range. Sell near {hi - rr:,.0f}, buy near {lo + rr:,.0f}, "
                   f"stops just outside the range, target the middle {center:,.0f}. Stand aside on a clean break of either edge.")
     return {
         "date": date, "locked_at": int(now.timestamp()), "locked_at_ist": now.strftime("%H:%M"),
@@ -126,6 +135,10 @@ def _plan_outcome(plan: dict, bars: pd.DataFrame) -> dict:
     """Walk the session bars: trigger, then first target or stop."""
     o = float(bars["open"].iloc[0])
     side, trig, stop, tgt = plan["side"], plan["trigger"], plan["stop"], plan["targets"][0]
+    risk_d = abs(trig - stop)
+    # a gap open already beyond the trigger means the breakout happened before you could act
+    if not plan.get("touch") and ((side == "buy" and o > trig + 0.5 * risk_d) or (side == "sell" and o < trig - 0.5 * risk_d)):
+        return {"triggered": False, "result": "no trade (gap through trigger)", "points": 0.0}
     entry, entry_t = None, None
     for t, b in bars.iterrows():
         h, l, c = float(b["high"]), float(b["low"]), float(b["close"])
