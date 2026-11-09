@@ -106,7 +106,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.3.0"}
+           "market_status": market_status(now), "engine_version": "1.3.1"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -229,7 +229,17 @@ def main():
             if bt_old and bt_old.get("twenty_year"):
                 bt["twenty_year"] = bt_old["twenty_year"]  # long backtest is produced by backtest_daily.py
             try:
-                bt["action_backtest"] = actioncall.backtest(s5, nd, daily, intraday, technical_score, intraday_model)
+                # the lock-time sweep is ~6x the cost of the main test: redo it on a manual run or weekly, else carry it over
+                ab_old = (bt_old or {}).get("action_backtest") or {}
+                old_sweep = ab_old.get("lock_time_sweep")
+                sweep_age = now.timestamp() - (ab_old.get("sweep_generated_at") or 0)
+                do_sweep = args.force_backtest or not old_sweep or sweep_age > 6 * 86400
+                t_ab = time.time()
+                ab = actioncall.backtest(s5, nd, daily, intraday, technical_score, intraday_model, sweep=do_sweep)
+                if not do_sweep:
+                    ab["lock_time_sweep"], ab["sweep_generated_at"] = old_sweep, ab_old.get("sweep_generated_at")
+                ab["seconds"] = round(time.time() - t_ab, 1)
+                bt["action_backtest"] = ab
             except Exception as e:
                 traceback.print_exc()
                 bt["action_backtest"] = (bt_old or {}).get("action_backtest") or {"error": f"{type(e).__name__}: {e}"}
@@ -291,9 +301,10 @@ def main():
         results_summary = dc_log.get("summary")
         # the 9:35 action call (opening range + intraday model)
         ref_close = float(day_call["prev_close"]) if day_call and day_call.get("date") == today_str else prev_close
+        chosen_variant = ((load_json(os.path.join(args.out, "backtest.json"), {}) or {}).get("action_backtest") or {}).get("shown_variant") or actioncall.DEFAULT_VARIANT
         dc_log["actions"] = actioncall.update_log(
             prev_actions, now, s5, run["market_status"],
-            lambda: actioncall.action_inputs(now, tb_today, nd_hist, tech, im, vix_ratio, ref_close))
+            lambda: actioncall.action_inputs(now, tb_today, nd_hist, tech, im, vix_ratio, ref_close), variant=chosen_variant)
         dc_log["action_summary"] = actioncall.summarise(dc_log["actions"])
         action_call = next((c for c in dc_log["actions"] if c["date"] == today_str), None) or (dc_log["actions"][-1] if dc_log["actions"] else None)
         dump(os.path.join(args.out, "daily_calls.json"), dc_log)
