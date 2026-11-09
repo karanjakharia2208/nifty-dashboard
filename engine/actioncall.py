@@ -238,7 +238,8 @@ def update_log(actions: list[dict], now: pd.Timestamp, s5: pd.DataFrame, market_
         else:
             actions.append({"date": today, "void": True, "evaluated": False, "locked_at": int(now.timestamp()),
                             "locked_at_ist": now.strftime("%H:%M"),
-                            "void_reason": f"no engine run between {LOCK_TIME:%H:%M} and {LOCK_DEADLINE:%H:%M}; a late lock was never tested, so no call today"})
+                            "void_reason": f"no usable engine run between {LOCK_TIME:%H:%M} and {LOCK_DEADLINE:%H:%M} "
+                                           f"(no run, or the feed was missing a key series); a late lock was never tested, so no call today"})
     return sorted(actions, key=lambda c: c["date"])[-KEEP_DAYS:]
 
 

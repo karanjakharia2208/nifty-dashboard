@@ -32,6 +32,8 @@ from regression import daily_model, gap_model, intraday_model, HORIZONS  # noqa:
 import daycall  # noqa: E402
 import actioncall  # noqa: E402
 
+REQUIRED_5M = ("NIFTY", "BANKNIFTY", "INDIAVIX")   # 5-minute series the 9:35 call and its backtest cannot do without
+
 IST = D.IST
 
 
@@ -106,7 +108,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.4.1"}
+           "market_status": market_status(now), "engine_version": "1.4.2"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -222,7 +224,14 @@ def main():
     # -------------------------------------------------------- backtest ---
     bt_path = os.path.join(args.out, "backtest.json")
     bt_old = load_json(bt_path, None)
-    need_bt = args.force_backtest or not bt_old or (now.timestamp() - bt_old.get("generated_at", 0) > 20 * 3600)
+    # The intraday model leans on BankNifty; when the feed misses a key series the signal is not the one that was
+    # tested, so neither the backtest nor the day's action call may be built from it.
+    feed_missing = [k for k in REQUIRED_5M if k not in intraday or intraday[k] is None or not len(intraday[k])]
+    if feed_missing:
+        print(f"feed incomplete: missing {feed_missing}; backtest kept, action call not locked on this run")
+    # weekly regeneration (or on demand): a 60-session test re-fitted daily flips near its thresholds, which would
+    # change the plan from one day to the next for no good reason
+    need_bt = (args.force_backtest or not bt_old or (now.timestamp() - bt_old.get("generated_at", 0) > 6 * 86400)) and not feed_missing
     if need_bt:
         try:
             bt = backtest(n5, nd, daily, intraday)
@@ -305,6 +314,8 @@ def main():
         def _action_inputs():
             # the call is always built from the bars up to the 09:30 bar, as in the backtest; if the feed has not
             # delivered that bar yet, wait for the next run rather than lock on fewer bars than were tested
+            if feed_missing:
+                return None
             tb_lock = tb_today[tb_today.index.time <= actioncall.LOCK_BAR]
             if not len(tb_lock) or tb_lock.index[-1].time() < actioncall.LOCK_BAR:
                 print("action call: 09:30 bar not in the feed yet; will lock on the next run")
