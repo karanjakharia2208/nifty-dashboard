@@ -108,7 +108,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.5.0"}
+           "market_status": market_status(now), "engine_version": "1.5.1"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -222,6 +222,18 @@ def main():
     plan = trade_plan(spot, zones, comb, cone, ind5["atr"])
 
     # -------------------------------------------------------- backtest ---
+    # files the workflow does not restore from the data branch are carried over here, so a routine run does not wipe them
+    for carry in ("research_dataset.json",):
+        cp = os.path.join(args.out, carry)
+        if not os.path.exists(cp):
+            try:
+                import subprocess
+                blob = subprocess.run(["git", "show", f"data:{carry}"], capture_output=True, text=True, timeout=30, cwd=os.path.dirname(os.path.abspath(__file__)))
+                if blob.returncode == 0 and blob.stdout.strip().startswith("{"):
+                    with open(cp, "w") as fh:
+                        fh.write(blob.stdout)
+            except Exception:
+                pass
     bt_path = os.path.join(args.out, "backtest.json")
     bt_old = load_json(bt_path, None)
     # The intraday model leans on BankNifty; when the feed misses a key series the signal is not the one that was
