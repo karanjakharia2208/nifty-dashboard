@@ -80,21 +80,21 @@ def make_day_call(now: pd.Timestamp, tb_today: pd.DataFrame, nd_hist: pd.DataFra
     r2 = res[1]["center"] if len(res) > 1 else r1 + max(2 * atr5, (r1 - ref))
     s1 = sup[0]["center"] if sup else ref - 1.5 * atr5
     s2 = sup[1]["center"] if len(sup) > 1 else s1 - max(2 * atr5, (ref - s1))
-    # Risk is capped at 0.35 daily ATR and the first target sits at least 1R
-    # away, so a plan never risks a whole day's range to make half of one.
+    # Risk is capped at 0.35 daily ATR and the first target sits at least 2R
+    # away (second at least 3R), so every plan risks less than it aims to make.
     bt = r1 + 0.15 * atr5
     brisk = min(bt - (s1 - 0.25 * atr5), 0.35 * atr_d)
-    bstop, bt1 = bt - brisk, max(r2, bt + brisk)
-    bt2 = max(bt1 + brisk, bt + 2 * brisk)
+    bstop, bt1 = bt - brisk, max(r2, bt + 2 * brisk)
+    bt2 = max(bt1 + brisk, bt + 3 * brisk)
     buy = {"side": "buy", "trigger": round(bt, 1), "stop": round(bstop, 1), "targets": [round(bt1, 1), round(bt2, 1)],
            "risk": round(brisk, 1), "text": f"Buy above {bt:,.0f}; stop {bstop:,.0f}; targets {bt1:,.0f} then {bt2:,.0f}"}
     st = s1 - 0.15 * atr5
     srisk = min((r1 + 0.25 * atr5) - st, 0.35 * atr_d)
-    sstop, st1 = st + srisk, min(s2, st - srisk)
-    st2 = min(st1 - srisk, st - 2 * srisk)
+    sstop, st1 = st + srisk, min(s2, st - 2 * srisk)
+    st2 = min(st1 - srisk, st - 3 * srisk)
     sell = {"side": "sell", "trigger": round(st, 1), "stop": round(sstop, 1), "targets": [round(st1, 1), round(st2, 1)],
             "risk": round(srisk, 1), "text": f"Sell below {st:,.0f}; stop {sstop:,.0f}; targets {st1:,.0f} then {st2:,.0f}"}
-    rr = 0.15 * atr_d
+    rr = 0.12 * atr_d   # entry just inside the edge, stop just outside: risk 0.24 ATR, first target (the centre) ≈ 2R away
     range_buy = {"side": "buy", "trigger": round(lo + rr, 1), "stop": round(lo - rr, 1),
                  "targets": [round(center, 1), round(hi - rr, 1)], "touch": True, "risk": round(2 * rr, 1),
                  "text": f"Buy near the range low {lo + rr:,.0f}; stop {lo - rr:,.0f}; targets {center:,.0f} then {hi - rr:,.0f}"}

@@ -152,19 +152,19 @@ def plan_and_score(s: dict, score: float) -> dict:
     r2 = res[1] if len(res) > 1 else r1 + max(2 * atr5, r1 - exp_open)
     s1 = sup[0] if sup else exp_open - 1.5 * atr5
     s2 = sup[1] if len(sup) > 1 else s1 - max(2 * atr5, exp_open - s1)
-    # risk capped at 0.35 ATR, first target at least 1R away (same as the live plan)
+    # risk capped at 0.35 ATR, first target at least 2R away (same as the live plan)
     if score > 0.15:
         side, trig = "buy", r1 + 0.15 * atr5
         risk = min(trig - (s1 - 0.25 * atr5), 0.35 * a)
-        stop, tgt = trig - risk, max(r2, trig + risk)
+        stop, tgt = trig - risk, max(r2, trig + 2 * risk)
     elif score < -0.15:
         side, trig = "sell", s1 - 0.15 * atr5
         risk = min((r1 + 0.25 * atr5) - trig, 0.35 * a)
-        stop, tgt = trig + risk, min(s2, trig - risk)
+        stop, tgt = trig + risk, min(s2, trig - 2 * risk)
     elif score <= 0:
-        side, trig, stop, tgt = "sell", hi - 0.15 * a, hi + 0.15 * a, center
+        side, trig, stop, tgt = "sell", hi - 0.12 * a, hi + 0.12 * a, center
     else:
-        side, trig, stop, tgt = "buy", lo + 0.15 * a, lo - 0.15 * a, center
+        side, trig, stop, tgt = "buy", lo + 0.12 * a, lo - 0.12 * a, center
     o, h, l, c = s["o"], s["h"], s["l"], s["c"]
     direction = 1 if c > o else -1 if c < o else 0
     pred_dir = 1 if score > 0.15 else -1 if score < -0.15 else 0

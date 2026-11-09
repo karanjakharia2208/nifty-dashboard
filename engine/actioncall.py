@@ -64,13 +64,16 @@ def action_inputs(now: pd.Timestamp, tb: pd.DataFrame, nd_hist: pd.DataFrame, te
 
 
 VARIANTS = {
-    # how the scored direction is turned into a trade; the backtest picks the one that works
-    "breakout_1r": "break of the opening range in the scored direction; stop ≤ 0.35 ATR; target 1R then 2R",
-    "breakout_2r": "break of the opening range in the scored direction; stop ≤ 0.35 ATR; target 2R then 3R",
-    "direction_hold": "enter at the lock price in the scored direction; stop 0.35 ATR; hold to the close",
-    "direction_1_5r": "enter at the lock price in the scored direction; stop 0.35 ATR; target 1.5R then 3R",
+    # how the scored direction is turned into a trade; the backtest picks the one that works.
+    # Only variants whose first target is at least 2x the risk (or that let winners run to the
+    # close) may be shown as trade levels; the 1R / 1.5R rows stay in the test as reference.
+    "breakout_1r": {"text": "break of the opening range in the scored direction; stop ≤ 0.35 ATR; target 1R then 2R", "eligible": False},
+    "breakout_2r": {"text": "break of the opening range in the scored direction; stop ≤ 0.35 ATR; target 2R then 3R", "eligible": True},
+    "direction_hold": {"text": "enter at the lock price in the scored direction; stop 0.35 ATR; no target — hold to the close", "eligible": True},
+    "direction_1_5r": {"text": "enter at the lock price in the scored direction; stop 0.35 ATR; target 1.5R then 3R", "eligible": False},
+    "direction_2r": {"text": "enter at the lock price in the scored direction; stop 0.35 ATR; target 2R then 3R", "eligible": True},
 }
-DEFAULT_VARIANT = "breakout_1r"
+DEFAULT_VARIANT = "breakout_2r"      # tracked (levels hidden) when nothing clears the gate
 
 
 def _plan(side, trig, risk, tmult, market, spot, hold=False):
@@ -93,7 +96,7 @@ def build_call(inp: dict, score: float | None = None, variant: str = DEFAULT_VAR
     if direction_variant:
         risk = 0.35 * atr_d
         hold = variant == "direction_hold"
-        tmult = 1.5 if variant == "direction_1_5r" else 1.0
+        tmult = {"direction_1_5r": 1.5, "direction_2r": 2.0}.get(variant, 1.0)
         buy = _plan("buy", spot, risk, tmult, True, spot, hold)
         sell = _plan("sell", spot, risk, tmult, True, spot, hold)
     else:
@@ -126,9 +129,11 @@ def build_call(inp: dict, score: float | None = None, variant: str = DEFAULT_VAR
             advice = (f"No lean yet: trade the break of the opening range {orb_l:,.0f}–{orb_h:,.0f} in whichever direction comes first — "
                       f"{buy['text']}, or {sell['text']}. Skip the day if neither triggers by 11:30.")
     return dict(inp, **{"bias": bias, "stance": stance, "score": round(s, 3), "variant": variant,
+                        "variant_text": VARIANTS.get(variant, {}).get("text", ""),
                         "confidence": round(float(np.clip(0.35 + 0.5 * abs(s), 0, 1)), 2),
                         "range_low": round(center - half, 1), "range_high": round(center + half, 1), "range_center": round(center, 1),
-                        "primary": primary, "alternate": alternate, "either_way": bool(either_way), "advice": advice, "evaluated": False})
+                        "primary": primary, "alternate": alternate, "reversal_plan": not direction_variant,
+                        "either_way": bool(either_way), "advice": advice, "evaluated": False})
 
 
 def evaluate_action(call: dict, bars_after: pd.DataFrame) -> dict:
@@ -171,7 +176,16 @@ def summarise(calls: list[dict]) -> dict:
     losses = [c for c in tr if c["result"]["taken"]["points"] <= 0]
     pts = [c["result"]["taken"]["points"] for c in tr]
     r_pts = [c["result"]["taken"]["points"] / max(float(c["primary"]["risk"]), 1.0) for c in tr]
+    win_pts = [p for p in pts if p > 0]
+    loss_pts = [p for p in pts if p <= 0]
+    # t-statistic of the per-trade R: how many standard errors the average trade sits above zero
+    t_stat = round(float(np.mean(r_pts) / (np.std(r_pts, ddof=1) / np.sqrt(len(r_pts)))), 2) if len(r_pts) >= 3 and np.std(r_pts, ddof=1) > 0 else None
+    eq = np.cumsum(pts) if pts else np.array([0.0])
     return {"days": len(ev), "window": [ev[0]["date"], ev[-1]["date"]],
+            "avg_win_points": round(float(np.mean(win_pts)), 1) if win_pts else None,
+            "avg_loss_points": round(float(np.mean(loss_pts)), 1) if loss_pts else None,
+            "payoff_ratio": round(float(np.mean(win_pts) / abs(np.mean(loss_pts))), 2) if win_pts and loss_pts and np.mean(loss_pts) != 0 else None,
+            "t_stat": t_stat, "max_drawdown_points": round(float((np.maximum.accumulate(eq) - eq).max()), 1),
             "direction_calls": len(d), "direction_hit_rate": round(sum(1 for c in d if c["result"]["direction_hit"]) / len(d), 3) if d else None,
             "range_contained_rate": round(sum(1 for c in ev if c["result"]["range_contained"]) / len(ev), 3),
             "close_in_range_rate": round(sum(1 for c in ev if c["result"]["close_in_range"]) / len(ev), 3),
@@ -217,9 +231,11 @@ def gate(s: dict, b: dict) -> dict:
     checks = [
         [s["days"] >= 30, f"{s['days']} sessions tested (need 30)"],
         [tr >= 20, f"{tr} trades (need 20)"],
-        [(s.get("net_r") or 0) > (b.get("net_r") or 0) + 3, f"net R {s.get('net_r')} vs random {b.get('net_r')} (need +3R gap)"],
+        [(s.get("net_r") or 0) > (b.get("net_r") or 0), f"net R {s.get('net_r')} vs random {b.get('net_r')} (must beat random)"],
+        [(s.get("t_stat") or 0) >= 2.0, f"t-stat {s.get('t_stat')} (need 2.0: average trade at least two standard errors above zero)"],
         [(s.get("avg_r_per_trade") or 0) >= 0.1, f"avg {s.get('avg_r_per_trade')} R per trade (need 0.10)"],
         [(s.get("direction_hit_rate") or 0) >= 0.55, f"direction right {round((s.get('direction_hit_rate') or 0) * 100)}% (need 55%)"],
+        [(s.get("payoff_ratio") or 0) >= 1.5, f"average win {s.get('avg_win_points')} vs average loss {s.get('avg_loss_points')} pts (need wins ≥ 1.5x losses)"],
     ]
     return {"ok": all(c[0] for c in checks), "checks": checks}
 
@@ -297,14 +313,16 @@ def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_
     scores = np.array([inp["score"] for inp, _ in inputs])
     shuffled = np.random.default_rng(0).permutation(scores)
     variants = {}
-    for v in VARIANTS:
+    for v, meta in VARIANTS.items():
         real_v = [evaluate_action(build_call(inp, variant=v), after) for inp, after in inputs]
         base_v = [evaluate_action(build_call(inp, sc, variant=v), after) for (inp, after), sc in zip(inputs, shuffled)]
         sv, bv = summarise(real_v), summarise(base_v)
-        variants[v] = {"description": VARIANTS[v], "summary": sv, "baseline": bv,
+        variants[v] = {"description": meta["text"], "eligible": meta["eligible"], "summary": sv, "baseline": bv,
                        "edge_r": round((sv.get("net_r") or 0) - (bv.get("net_r") or 0), 2),
                        "passes": gate(sv, bv)["ok"]}
-    chosen = max((v for v in variants if variants[v]["passes"]), key=lambda v: variants[v]["summary"].get("net_r") or -1e9, default=None)
+    # among eligible variants that clear the gate, prefer the most statistically solid (t-stat), then net R
+    chosen = max((v for v in variants if variants[v]["passes"] and variants[v]["eligible"]),
+                 key=lambda v: ((variants[v]["summary"].get("t_stat") or -1e9), (variants[v]["summary"].get("net_r") or -1e9)), default=None)
     show = chosen or DEFAULT_VARIANT
     real = [evaluate_action(build_call(inp, variant=show), after) for inp, after in inputs]
     return {"summary": variants[show]["summary"], "baseline": variants[show]["baseline"], "variants": variants,
@@ -313,6 +331,8 @@ def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_
                 "taken_side": c["result"]["taken"]["side"], "result": c["result"]["taken"]["result"],
                 "points": c["result"]["taken"]["points"], "direction_hit": c["result"]["direction_hit"]} for c in real],
             "generated_at": int(pd.Timestamp.now(tz="Asia/Kolkata").timestamp()),
-            "method": "walk-forward over the available 5-minute history; locked at 09:35 with data up to then; "
-                      "opening-range breakout plans, risk capped at 0.35 daily ATR, first target 1R; scored on 5-minute bars "
-                      "(same-bar stop/target conflicts count as a stop); baseline = same plans with the daily scores shuffled"}
+            "method": "walk-forward over the available 5-minute history; locked at 09:35 with data up to then; the same "
+                      "direction score is traded five ways (opening-range break or entry at the lock; 1R/1.5R/2R targets or "
+                      "hold to the close), risk capped at 0.35 daily ATR; scored on 5-minute bars (same-bar stop/target "
+                      "conflicts count as a stop); baseline = same plans with the daily scores shuffled; only a variant whose "
+                      "first target is at least 2R (or that holds to the close) may be shown, and only if it clears every gate check"}
