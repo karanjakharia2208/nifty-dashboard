@@ -23,7 +23,10 @@ import pandas as pd
 import indicators as ti
 from daycall import _plan_outcome, KEEP_DAYS
 
-LOCK_TIME = dt.time(9, 32)      # earliest lock: needs the 9:15, 9:20, 9:25, 9:30 bars
+LOCK_BAR = dt.time(9, 30)       # the call is built from the bars up to and including the 09:30 bar, whenever the run happens
+LOCK_TIME = dt.time(9, 36)      # earliest lock: the 09:30 bar is complete at 09:35 (plus a minute for the feed)
+LOCK_DEADLINE = dt.time(10, 0)  # no run by then = no action call that day (a late lock was never tested)
+VALID_UNTIL = "09:50"           # the entry is good until then, if price has not run away (see _plan)
 ORB_BARS = 3                    # 09:15–09:30 opening range
 WEIGHTS = {"regression": 0.5, "technical": 0.3, "structure": 0.2}
 
@@ -84,8 +87,12 @@ def _plan(side, trig, risk, tmult, market, spot, hold=False):
     verb = ("Buy" if side == "buy" else "Sell")
     where = f"{verb} now near {spot:,.0f}" if market else (f"{verb} above {trig:,.0f}" if side == "buy" else f"{verb} below {trig:,.0f}")
     tgt_txt = "hold to the close" if hold else f"targets {t1:,.0f} then {t2:,.0f}"
+    # a market entry is only valid while price is still close to the lock price: chasing more than half the risk is skipped
+    chase = trig + sgn * 0.5 * risk
+    valid = f"; valid until {VALID_UNTIL}, skip if already {'above' if side == 'buy' else 'below'} {chase:,.0f}" if market else ""
     return {"side": side, "trigger": round(trig, 1), "stop": round(stop, 1), "targets": [round(t1, 1), round(t2, 1)],
-            "risk": round(risk, 1), "market": bool(market), "hold": bool(hold), "text": f"{where}; stop {stop:,.0f}; {tgt_txt}"}
+            "risk": round(risk, 1), "market": bool(market), "hold": bool(hold), "chase_limit": round(chase, 1) if market else None,
+            "text": f"{where}; stop {stop:,.0f}; {tgt_txt}{valid}"}
 
 
 def build_call(inp: dict, score: float | None = None, variant: str = DEFAULT_VARIANT) -> dict:
@@ -128,7 +135,7 @@ def build_call(inp: dict, score: float | None = None, variant: str = DEFAULT_VAR
         else:
             advice = (f"No lean yet: trade the break of the opening range {orb_l:,.0f}–{orb_h:,.0f} in whichever direction comes first — "
                       f"{buy['text']}, or {sell['text']}. Skip the day if neither triggers by 11:30.")
-    return dict(inp, **{"bias": bias, "stance": stance, "score": round(s, 3), "variant": variant,
+    return dict(inp, **{"bias": bias, "stance": stance, "score": round(s, 3), "variant": variant, "valid_until": VALID_UNTIL,
                         "variant_text": VARIANTS.get(variant, {}).get("text", ""),
                         "confidence": round(float(np.clip(0.35 + 0.5 * abs(s), 0, 1)), 2),
                         "range_low": round(center - half, 1), "range_high": round(center + half, 1), "range_center": round(center, 1),
@@ -136,7 +143,12 @@ def build_call(inp: dict, score: float | None = None, variant: str = DEFAULT_VAR
                         "either_way": bool(either_way), "advice": advice, "evaluated": False})
 
 
-def evaluate_action(call: dict, bars_after: pd.DataFrame) -> dict:
+def evaluate_action(call: dict, bars_after: pd.DataFrame, delay_bars: int = 0) -> dict:
+    """Score a call on the bars after its lock. `delay_bars` skips that many
+    5-minute bars before the entry is allowed (1 = enter at 09:40, 2 = 09:45...),
+    to price in the time it takes for the call to reach the screen."""
+    if delay_bars:
+        bars_after = bars_after.iloc[delay_bars:]
     if not len(bars_after):
         return dict(call, void=True, void_reason="no bars after the lock")
     c = float(bars_after["close"].iloc[-1])
@@ -217,9 +229,16 @@ def update_log(actions: list[dict], now: pd.Timestamp, s5: pd.DataFrame, market_
         elif c["date"] < today or now.time() >= dt.time(16, 0):
             c["void"], c["void_reason"] = True, "no session data (holiday or feed gap)"
     if today not in by_date and now.weekday() < 5 and market_status == "open" and now.time() >= LOCK_TIME:
-        inp = make_inputs()
-        if inp:
-            actions.append(build_call(inp, variant=variant))
+        if now.time() <= LOCK_DEADLINE:
+            inp = make_inputs()
+            if inp:
+                call = build_call(inp, variant=variant)
+                call["run_at_ist"] = now.strftime("%H:%M")   # when the engine actually ran; locked_at_ist is the signal time (09:35)
+                actions.append(call)
+        else:
+            actions.append({"date": today, "void": True, "evaluated": False, "locked_at": int(now.timestamp()),
+                            "locked_at_ist": now.strftime("%H:%M"),
+                            "void_reason": f"no engine run between {LOCK_TIME:%H:%M} and {LOCK_DEADLINE:%H:%M}; a late lock was never tested, so no call today"})
     return sorted(actions, key=lambda c: c["date"])[-KEEP_DAYS:]
 
 
@@ -325,7 +344,14 @@ def _backtest_at(s5, nd, daily, intraday, technical_score, intraday_model, last_
                  key=lambda v: ((variants[v]["summary"].get("t_stat") or -1e9), (variants[v]["summary"].get("net_r") or -1e9)), default=None)
     show = chosen or DEFAULT_VARIANT
     real = [evaluate_action(build_call(inp, variant=show), after) for inp, after in inputs]
-    return {"summary": variants[show]["summary"], "baseline": variants[show]["baseline"], "variants": variants,
+    # what the same calls would have made if the entry happened 5/10/15 minutes after the lock
+    execution = {}
+    for d in (0, 1, 2, 3):
+        ev = [evaluate_action(build_call(inp, variant=show), after, delay_bars=d) for inp, after in inputs]
+        sd = summarise(ev)
+        execution[f"entry_{(dt.datetime.combine(dt.date.today(), dt.time(9, 35)) + dt.timedelta(minutes=5 * d)):%H:%M}"] = {
+            k: sd.get(k) for k in ("trades", "win_rate", "net_points", "net_r", "avg_r_per_trade", "t_stat", "payoff_ratio", "max_drawdown_points", "no_trade_days")}
+    return {"summary": variants[show]["summary"], "baseline": variants[show]["baseline"], "variants": variants, "execution": execution,
             "chosen_variant": chosen, "shown_variant": show, "gate": gate(variants[show]["summary"], variants[show]["baseline"]),
             "records": [{k: c[k] for k in ("date", "score", "stance", "spot", "orb_high", "orb_low")} | {
                 "taken_side": c["result"]["taken"]["side"], "result": c["result"]["taken"]["result"],

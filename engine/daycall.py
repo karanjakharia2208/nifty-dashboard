@@ -138,8 +138,11 @@ def _plan_outcome(plan: dict, bars: pd.DataFrame) -> dict:
     risk_d = abs(trig - stop)
     # a gap open already beyond the trigger means the breakout happened before you could act
     if not plan.get("touch") and ((side == "buy" and o > trig + 0.5 * risk_d) or (side == "sell" and o < trig - 0.5 * risk_d)):
-        return {"triggered": False, "result": "no trade (gap through trigger)", "points": 0.0}
+        return {"triggered": False, "result": "no trade (gap through trigger)" if not plan.get("market") else "no trade (price ran away before entry)", "points": 0.0}
     entry, entry_t = None, None
+    if plan.get("market"):
+        # an at-market entry fills at the first available price, better or worse than the lock price
+        entry, entry_t = o, int(bars.index[0].timestamp())
     for t, b in bars.iterrows():
         h, l, c = float(b["high"]), float(b["low"]), float(b["close"])
         if entry is None:

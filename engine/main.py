@@ -106,7 +106,7 @@ def main():
     if os.environ.get("ENGINE_NOW"):  # testing hook: pretend it is another time
         now = pd.Timestamp(os.environ["ENGINE_NOW"]).tz_localize(IST)
     run = {"run_at": int(now.timestamp()), "run_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
-           "market_status": market_status(now), "engine_version": "1.4.0"}
+           "market_status": market_status(now), "engine_version": "1.4.1"}
 
     # ------------------------------------------------------------ data ---
     intraday_names = ["NIFTY"] + D.INTRADAY_FACTORS
@@ -302,9 +302,25 @@ def main():
         # the 9:35 action call (opening range + intraday model)
         ref_close = float(day_call["prev_close"]) if day_call and day_call.get("date") == today_str else prev_close
         chosen_variant = ((load_json(os.path.join(args.out, "backtest.json"), {}) or {}).get("action_backtest") or {}).get("shown_variant") or actioncall.DEFAULT_VARIANT
-        dc_log["actions"] = actioncall.update_log(
-            prev_actions, now, s5, run["market_status"],
-            lambda: actioncall.action_inputs(now, tb_today, nd_hist, tech, im, vix_ratio, ref_close), variant=chosen_variant)
+        def _action_inputs():
+            # the call is always built from the bars up to the 09:30 bar, as in the backtest; if the feed has not
+            # delivered that bar yet, wait for the next run rather than lock on fewer bars than were tested
+            tb_lock = tb_today[tb_today.index.time <= actioncall.LOCK_BAR]
+            if not len(tb_lock) or tb_lock.index[-1].time() < actioncall.LOCK_BAR:
+                print("action call: 09:30 bar not in the feed yet; will lock on the next run")
+                return None
+            # technicals and the intraday model are recomputed on the data as it stood at 09:35, so a run at 09:46
+            # produces exactly the call a run at 09:36 would have (and exactly what the backtest scored)
+            t_lock = tb_lock.index[-1] + pd.Timedelta(minutes=5)
+            n5_lock = n5[n5.index < t_lock]
+            try:
+                tech_lock = technical_score(n5_lock, nd_hist, oc if oc.get("expiries") else None, manual)
+                im_lock = intraday_model(n5_lock, {k: v[v.index < t_lock] for k, v in intraday.items()}, asof=t_lock)
+            except Exception:
+                traceback.print_exc()
+                tech_lock, im_lock = tech, im
+            return actioncall.action_inputs(t_lock, tb_lock, nd_hist, tech_lock, im_lock, vix_ratio, ref_close)
+        dc_log["actions"] = actioncall.update_log(prev_actions, now, s5, run["market_status"], _action_inputs, variant=chosen_variant)
         dc_log["action_summary"] = actioncall.summarise(dc_log["actions"])
         action_call = next((c for c in dc_log["actions"] if c["date"] == today_str), None) or (dc_log["actions"][-1] if dc_log["actions"] else None)
         dump(os.path.join(args.out, "daily_calls.json"), dc_log)

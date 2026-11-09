@@ -265,9 +265,13 @@ FRED_SERIES = {
 
 def fred_macro() -> dict:
     out = {}
+    dead = False   # FRED blocks the runners most days: after the first timeout, stop (13 x 15 s was costing 3 minutes a run)
     for sid, label in FRED_SERIES.items():
+        if dead:
+            out[sid] = {"label": label, "error": "skipped after timeout"}
+            continue
         try:
-            r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=15,
+            r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=8,
                              headers={"User-Agent": _UA})
             r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text))
@@ -283,5 +287,7 @@ def fred_macro() -> dict:
                             "history": [[str(d), float(v)] for d, v in zip(df["date"], df["value"])]}
         except Exception as e:
             out[sid] = {"label": label, "error": type(e).__name__}
+            if "Timeout" in type(e).__name__ or "Connection" in type(e).__name__:
+                dead = True
     STATUS["fred"] = f"ok {sum(1 for v in out.values() if 'value' in v)}/{len(FRED_SERIES)}"
     return out
