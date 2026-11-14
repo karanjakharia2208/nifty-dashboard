@@ -1,0 +1,1 @@
+{"run":{"run_at":1794569803,"run_at_ist":"2026-11-13 17:06 IST","market_status":"closed","engine_version":"1.5.1","seconds":17.7},"sources":{"yahoo_5m":"ok 23/23","yahoo_1d":"ok 34/34","nse_option_chain":"ok 4 expiries","nse_futures":"failed: HTTPError","nse_fii_dii":"ok","fred":"ok 0/13"}}
